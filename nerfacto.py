@@ -532,7 +532,7 @@ class NerfactoModel(Model):
                         full_target_image = torch.zeros((H, W, 3), dtype=torch.float32, device=self.device)
 
                 full_target_image = torch.clamp(full_target_image, 0.0, 1.0)
-                camera_idx = batch["camera_indices"][0].item()
+                camera_idx = batch["camera_indices"][0].item() if "camera_indices" in batch else 0
 
                 target_patch, patch_coords = self.datamanager.sample_image_patch(
                     full_target_image, camera_idx, self.config.lpips_patch_size
