@@ -23,7 +23,6 @@ from typing import Dict, List, Literal, Optional, Tuple, Type
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.nn import Parameter
 
 from nerfstudio.cameras.camera_optimizers import CameraOptimizer, CameraOptimizerConfig
@@ -263,7 +262,7 @@ class NerfactoModel(Model):
         self.ssim = structural_similarity_index_measure
         self.lpips = LearnedPerceptualImagePatchSimilarity(normalize=True)
         self.step = 0
-
+        
         # Added LPIPS initialization when flagged
         if self.config.use_lpips:
             self.lpips_loss_fn = HybridRGBLPIPSLoss(
@@ -282,49 +281,48 @@ class NerfactoModel(Model):
         patch_size: int,
     ) -> torch.Tensor:
         """Render a specific patch region from the NeRF model.
-
+        
         Only generates and renders rays for the patch region,
         avoiding memory overhead of rendering full images.
-
+        
         Args:
             camera_idx: Index of camera to use
             patch_coords: (top, left) position of patch
             patch_size: Size of square patch
-
+            
         Returns:
             Rendered patch [patch_size, patch_size, 3], float32, range [0, 1]
         """
         top, left = patch_coords
-
+        
         # Get the camera
-        camera = self.train_dataset.cameras[camera].to(self.device) if isinstance(camera_idx, int) and False else self.train_dataset.cameras[camera_idx].to(self.device)
-
+        camera = self.train_dataset.cameras[camera_idx].to(self.device)
+        
         # Get image dimensions
         height = int(camera.height.item())
         width = int(camera.width.item())
-
+        
         # Clamp patch to image bounds
         top = max(0, min(top, height - patch_size))
         left = max(0, min(left, width - patch_size))
-
+        
         # Generate pixel coordinates for patch
         coords = self._get_patch_coords(top, left, patch_size, height, width)
-
+        
         # Generate rays for these coordinates
         ray_bundle = camera.generate_rays(
             camera_indices=0,
             coords=coords,
         )
-
+        
         # Render in chunks to manage memory
         chunk_size = 4096
         rgb_outputs = []
-        accumulation_outputs = []
-
+        
         num_rays = ray_bundle.origins.shape[0]
         for i in range(0, num_rays, chunk_size):
             end_idx = min(i + chunk_size, num_rays)
-
+            
             # Create ray bundle for this chunk
             chunk_bundle = RayBundle(
                 origins=ray_bundle.origins[i:end_idx],
@@ -335,38 +333,38 @@ class NerfactoModel(Model):
                 fars=ray_bundle.fars[i:end_idx] if ray_bundle.fars is not None else None,
                 metadata=ray_bundle.metadata,
             )
-
+            
             # Render this chunk
             with torch.no_grad():  # No gradients needed for LPIPS input
                 outputs = self.get_outputs(chunk_bundle)
                 rgb_outputs.append(outputs["rgb"])
                 accumulation_outputs.append(outputs["accumulation"])
-
+    
         # Concatenate and reshape to patch
         rgb_flat = torch.cat(rgb_outputs, dim=0)
         accumulation_flat = torch.cat(accumulation_outputs, dim=0)
-
+    
         rendered_rgb = rgb_flat.view(patch_size, patch_size, 3)
         rendered_accumulation = accumulation_flat.view(patch_size, patch_size, 1)
-
+    
         # Apply background blending (same as training)
         # Create a dummy gt_image (will be ignored in blending)
         dummy_gt = torch.zeros_like(rendered_rgb)
-
+    
         # Use the same blending function
         rendered_rgb_blended, _ = self.renderer_rgb.blend_background_for_loss_computation(
             pred_image=rendered_rgb.view(-1, 3),
             pred_accumulation=rendered_accumulation.view(-1, 1),
             gt_image=dummy_gt.view(-1, 3),
         )
-
+    
         # Reshape back to patch
         rendered_patch = rendered_rgb_blended.view(patch_size, patch_size, 3)
-
+    
         # Ensure float32 and clamp to [0, 1]
         rendered_patch = rendered_patch.float()
         rendered_patch = torch.clamp(rendered_patch, 0.0, 1.0)
-
+    
         return rendered_patch
 
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
@@ -513,26 +511,9 @@ class NerfactoModel(Model):
             # --- Compute LPIPS depending on input type ---
             if experiment == "A":
                 # Patch-based LPIPS (baseline)
-                # Use 'full_image' when available, otherwise fall back to batch['image']
-                if "full_image" in batch and batch["full_image"] is not None:
-                    full_target_image = batch["full_image"][0].to(self.device).float()
-                else:
-                    # Fallback: use the available image in the batch.
-                    # batch["image"] is typically [B, H, W, C]. Use index 0 to match original code.
-                    if "image" in batch:
-                        full_target_image = batch["image"][0].to(self.device).float()
-                        # Ensure RGBA → RGB blending is identical to training metrics path
-                        full_target_image = self.renderer_rgb.blend_background(full_target_image)
-                    else:
-                        # As a last resort, create a dummy black image of the expected size.
-                        camera_idx = batch["camera_indices"][0].item() if "camera_indices" in batch else 0
-                        cam = self.train_dataset.cameras[camera_idx]
-                        H = int(cam.height.item())
-                        W = int(cam.width.item())
-                        full_target_image = torch.zeros((H, W, 3), dtype=torch.float32, device=self.device)
-
+                full_target_image = batch["full_image"][0].to(self.device).float()
                 full_target_image = torch.clamp(full_target_image, 0.0, 1.0)
-                camera_idx = batch["camera_indices"][0].item() if "camera_indices" in batch else 0
+                camera_idx = batch["camera_indices"][0].item()
 
                 target_patch, patch_coords = self.datamanager.sample_image_patch(
                     full_target_image, camera_idx, self.config.lpips_patch_size
