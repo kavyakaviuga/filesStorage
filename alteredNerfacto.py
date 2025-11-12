@@ -492,60 +492,16 @@ class NerfactoModel(Model):
         lpips_enabled = getattr(self.config, "use_lpips", False)
 
         # --- LPIPS Experiment Handling ---
-        if not lpips_enabled:
-            loss_dict["rgb_loss"] = self.rgb_loss(gt_rgb, pred_rgb)
+        # Note: Full-image LPIPS requires custom datamanager modifications
+        # For now, we only support MSE loss during ray-based training
+        
+        if not lpips_enabled or experiment == "A":
+            # Experiment A requires patch-based training which needs datamanager changes
+            # For now, fall back to MSE loss
+            loss_dict["rgb_loss"] = self.rgb_loss(pred_rgb, gt_rgb)
         else:
-            # --- Determine LPIPS frequency ---
-            if experiment in ["A", "B"]:
-                should_compute_lpips = True
-            else:  # C or D
-                every_n = getattr(self.config, "lpips_every_n_steps", 10)
-                should_compute_lpips = (self.global_step % every_n == 0)
-
-            # --- Determine weight schedule ---
-            if experiment == "D":
-                lpips_weight = min(1.0, self.global_step / 10000) * self.config.lpips_weight
-            else:
-                lpips_weight = self.config.lpips_weight
-
-            # --- Compute LPIPS depending on input type ---
-            if experiment == "A":
-                # Patch-based LPIPS (baseline)
-                full_target_image = batch["full_image"][0].to(self.device).float()
-                full_target_image = torch.clamp(full_target_image, 0.0, 1.0)
-                camera_idx = batch["camera_indices"][0].item()
-
-                target_patch, patch_coords = self.datamanager.sample_image_patch(
-                    full_target_image, camera_idx, self.config.lpips_patch_size
-                )
-                with torch.cuda.amp.autocast(enabled=False):
-                    rendered_patch = self.render_image_patch(
-                        camera_idx=camera_idx,
-                        patch_coords=patch_coords,
-                        patch_size=self.config.lpips_patch_size,
-                    )
-
-                lpips_loss = self.lpips(rendered_patch, target_patch)
-                rgb_loss = self.rgb_loss(pred_rgb, gt_rgb)
-                total_loss = rgb_loss + lpips_weight * lpips_loss
-
-                loss_dict["rgb_loss"] = rgb_loss
-                loss_dict["lpips_loss"] = lpips_weight * lpips_loss
-
-            else:
-                # Full-image LPIPS (B, C, D)
-                if should_compute_lpips:
-                    pred_img_down = F.interpolate(pred_rgb.permute(0, 3, 1, 2), scale_factor=0.5, mode='bilinear')
-                    gt_img_down = F.interpolate(gt_rgb.permute(0, 3, 1, 2), scale_factor=0.5, mode='bilinear')
-                    lpips_loss = self.lpips(pred_img_down, gt_img_down)
-                    rgb_loss = self.rgb_loss(pred_rgb, gt_rgb)
-                    total_loss = rgb_loss + lpips_weight * lpips_loss
-
-                    loss_dict["rgb_loss"] = rgb_loss
-                    loss_dict["lpips_loss"] = lpips_weight * lpips_loss
-                else:
-                    # Skip LPIPS this iteration
-                    loss_dict["rgb_loss"] = self.rgb_loss(pred_rgb, gt_rgb)
+            # Experiments B, C, D: Use MSE during training, LPIPS only at eval
+            loss_dict["rgb_loss"] = self.rgb_loss(pred_rgb, gt_rgb)
 
         # --- Standard Nerfacto losses ---
         if self.training:
